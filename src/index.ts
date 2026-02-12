@@ -4,12 +4,11 @@ export const name = 'isolate'
 export const filter = false
 export const reusable = true
 export const usage = `
+---
+
 黑白名单过滤插件 - 基于 isolate 双层隔离架构实现完全屏蔽指定用户。
 
-工作原理：
-- 在根上下文注册全局过滤中间件（最高优先级）
-- 被屏蔽用户的消息在进入任何插件之前就被拦截
-- 所有插件（包括统计、前置中间件等）都看不到被屏蔽用户
+---
 `
 
 export interface Config {
@@ -45,7 +44,7 @@ export function apply(ctx: Context, config: Config) {
   let isActive = true
 
   // 在根上下文注册全局过滤中间件
-  // 关键：使用 ctx.accept() 确保中间件在插件禁用时被移除
+  // 使用 ctx.accept() 确保中间件在插件禁用时被移除
   ctx.accept(['blacklist', 'whitelist', 'filterMode', 'logBlocked'], (newConfig) => {
     // 配置更新时重新应用
     Object.assign(config, newConfig)
