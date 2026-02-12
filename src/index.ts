@@ -37,9 +37,22 @@ const kRecord = Symbol.for('koishi.loader.record')
 export function apply(ctx: Context, config: Config) {
   ctx.logger.info('启用黑白名单过滤插件，过滤模式: %s', config.filterMode)
 
+  // 标记插件是否已启用
+  let isActive = true
+
   // 在根上下文注册全局过滤中间件
-  // 这样所有插件（包括 isolate 组外的插件）都会被过滤
-  ctx.root.middleware((session, next) => {
+  // 关键：使用 ctx.accept() 确保中间件在插件禁用时被移除
+  ctx.accept(['blacklist', 'whitelist', 'filterMode'], (newConfig) => {
+    // 配置更新时重新应用
+    Object.assign(config, newConfig)
+  })
+
+  const dispose = ctx.root.middleware((session, next) => {
+    // 检查插件是否仍然活跃
+    if (!isActive) {
+      return next()
+    }
+
     const userId = session.userId || session.event?.user?.id
 
     // 黑白名单过滤逻辑
@@ -52,6 +65,13 @@ export function apply(ctx: Context, config: Config) {
     // 通过过滤的消息继续传递
     return next()
   }, true) // prepend 确保最先执行
+
+  // 当插件被禁用时，注销中间件
+  ctx.on('dispose', () => {
+    isActive = false
+    dispose()
+    ctx.logger.info('黑白名单过滤插件已禁用，中间件已注销')
+  })
 
   // 加载插件组内的插件（如果有的话）
   const parentConfig = ctx.scope.parent.config
