@@ -8,28 +8,39 @@ export const usage = `
 
 ### 功能介绍
 
-这是一个基于 Koishi isolate 插件改造的黑白名单过滤插件，通过"力达砖飞"的方式实现消息过滤。
+这是一个基于 Koishi isolate 插件改造的黑白名单过滤插件，支持**消息级过滤**和**指令级权限控制**。
 
 ### 工作原理
 
+#### 消息级过滤
 - **轮询重新注册**：每隔一段时间（默认 100ms）重新注册前置中间件
 - **优先级保证**：利用"后注册的前置中间件优先级更高"的特性，确保过滤器永远是第一个执行
 - **消息拦截**：被屏蔽的消息会被清空内容并阻止传递到其他中间件
 - **性能可控**：可以调整重新注册间隔来平衡优先级稳定性和性能开销
 
+#### 指令级权限控制
+- **before 钩子**：使用 \`ctx.before('command/execute')\` 在指令执行前拦截
+- **精确控制**：可以针对特定用户限制特定指令的使用权限
+- **通配符支持**：支持 \`*\` 通配符匹配多个指令（如 \`admin.*\` 匹配所有 admin 开头的指令）
+
 ### 过滤规则
 
-支持多种过滤条件：
+#### 消息级过滤支持：
 - **userId**：用户 ID
 - **channelId**：频道 ID
 - **guildId**：群组 ID
 - **platform**：平台名称（如 onebot、discord 等）
 
+#### 指令级过滤支持：
+- **userId + commands**：针对特定用户限制指令列表
+- **通配符**：\`*\` 匹配任意字符，\`admin.*\` 匹配所有 admin 开头的指令
+
 ### 使用方法
 
 1. 将 isolate 插件和需要保护的插件放在同一个分组
-2. 配置黑名单或白名单规则
-3. 插件会自动保持最高优先级，拦截符合规则的消息
+2. 配置消息级黑白名单规则（可选）
+3. 启用指令级过滤并配置指令黑白名单（可选）
+4. 插件会自动拦截符合规则的消息和指令
 
 ### 黑名单模式 vs 白名单模式
 
@@ -41,6 +52,7 @@ export const usage = `
 由于 Koishi 的中间件和事件系统并行触发，无法保证中间件一定在事件监听器之前执行。因此：
 - ✅ 可以拦截中间件链中的消息
 - ✅ 可以清空消息内容
+- ✅ 可以完全阻止指令执行（通过 before 钩子）
 - ⚠️ 无法完全阻止事件监听器触发（但它们会获取到空内容）
 
 ### 性能建议
@@ -58,12 +70,23 @@ interface FilterRule {
   reason?: string
 }
 
+interface CommandRule {
+  userId: string
+  commands: string[]
+  reason?: string
+}
+
 export interface Config {
   filterMode: 'blacklist' | 'whitelist'
   blacklist?: FilterRule[]
   whitelist?: FilterRule[]
   logBlocked: boolean
   reregisterInterval: number
+  enableCommandFilter: boolean
+  commandFilterMode?: 'blacklist' | 'whitelist'
+  commandBlacklist?: CommandRule[]
+  commandWhitelist?: CommandRule[]
+  replyNoPermission?: boolean
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -71,9 +94,10 @@ export const Config: Schema<Config> = Schema.intersect([
     reregisterInterval: Schema.number().description('重新注册中间件的间隔时间（毫秒）。越小优先级越稳定，但性能开销越大。')
       .default(100).min(50).max(5000),
   }).description('基础配置'),
+
   Schema.object({
-    filterMode: Schema.union(['blacklist', 'whitelist']).description('过滤模式').default('blacklist'),
-  }).description('名单配置'),
+    filterMode: Schema.union(['blacklist', 'whitelist']).description('消息过滤模式').default('blacklist'),
+  }).description('消息级过滤'),
   Schema.union([
     Schema.object({
       filterMode: Schema.const('blacklist'),
@@ -86,7 +110,7 @@ export const Config: Schema<Config> = Schema.intersect([
         ]).description('过滤类型').role('radio').default('userId'),
         value: Schema.string().description('过滤值').required(),
         reason: Schema.string().description('过滤原因（备注）'),
-      })).role('table').description('黑名单规则列表').default([]),
+      })).role('table').description('消息黑名单规则').default([]),
     }),
     Schema.object({
       filterMode: Schema.const('whitelist').required(),
@@ -99,12 +123,46 @@ export const Config: Schema<Config> = Schema.intersect([
         ]).description('过滤类型').role('radio').default('userId'),
         value: Schema.string().description('过滤值').required(),
         reason: Schema.string().description('过滤原因（备注）'),
-      })).role('table').description('白名单规则列表').default([]),
+      })).role('table').description('消息白名单规则').default([]),
     }),
   ]),
 
   Schema.object({
-    logBlocked: Schema.boolean().description('是否记录被屏蔽消息的日志').default(false),
+    enableCommandFilter: Schema.boolean().description('启用指令级权限控制').default(false),
+  }).description('指令级过滤'),
+  Schema.union([
+    Schema.object({
+      enableCommandFilter: Schema.const(false).required(),
+    }),
+    Schema.intersect([
+      Schema.object({
+        enableCommandFilter: Schema.const(true).required(),
+        commandFilterMode: Schema.union(['blacklist', 'whitelist']).description('指令过滤模式').default('blacklist'),
+        replyNoPermission: Schema.boolean().description('回复"你没有权限使用此指令"').default(true),
+      }),
+      Schema.union([
+        Schema.object({
+          commandFilterMode: Schema.const('blacklist'),
+          commandBlacklist: Schema.array(Schema.object({
+            userId: Schema.string().description('用户 ID').required(),
+            commands: Schema.array(Schema.string()).description('禁止使用的指令列表（支持通配符 *）').role('table').default([]),
+            reason: Schema.string().description('限制原因（备注）'),
+          })).role('table').description('指令黑名单规则').default([]),
+        }),
+        Schema.object({
+          commandFilterMode: Schema.const('whitelist'),
+          commandWhitelist: Schema.array(Schema.object({
+            userId: Schema.string().description('用户 ID').required(),
+            commands: Schema.array(Schema.string()).description('允许使用的指令列表（支持通配符 *）').role('table').default([]),
+            reason: Schema.string().description('限制原因（备注）'),
+          })).role('table').description('指令白名单规则').default([]),
+        }),
+      ]),
+    ]),
+  ]),
+
+  Schema.object({
+    logBlocked: Schema.boolean().description('记录被屏蔽的消息和指令').default(false),
   }).description('调试设置'),
 ])
 
@@ -112,11 +170,58 @@ export const Config: Schema<Config> = Schema.intersect([
 
 const kRecord = Symbol.for('koishi.loader.record')
 
+// 判断是否应该过滤指令
+function shouldFilterCommand(userId: string, commandName: string, config: Config): boolean {
+  if (!config.enableCommandFilter) {
+    return false
+  }
+
+  // 通配符匹配函数
+  const matchPattern = (pattern: string, text: string): boolean => {
+    const regexPattern = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')  // 转义特殊字符
+      .replace(/\*/g, '.*')  // * 转换为 .*
+    const regex = new RegExp(`^${regexPattern}$`)
+    return regex.test(text)
+  }
+
+  if (config.commandFilterMode === 'blacklist') {
+    // 黑名单模式：如果用户在黑名单中且指令匹配，则屏蔽
+    return (config.commandBlacklist || []).some(rule => {
+      if (rule.userId !== userId) {
+        return false
+      }
+      return rule.commands.some(pattern => matchPattern(pattern, commandName))
+    })
+  }
+
+  if (config.commandFilterMode === 'whitelist') {
+    // 白名单模式：如果用户不在白名单中或指令不匹配，则屏蔽
+    const userRule = (config.commandWhitelist || []).find(rule => rule.userId === userId)
+
+    if (!userRule) {
+      // 用户不在白名单中，屏蔽所有指令
+      return true
+    }
+
+    // 用户在白名单中，检查指令是否匹配
+    const isAllowed = userRule.commands.some(pattern => matchPattern(pattern, commandName))
+    return !isAllowed
+  }
+
+  return false
+}
+
 export function apply(ctx: Context, config: Config) {
-  ctx.logger.info('启用黑白名单过滤插件，过滤模式: %s', config.filterMode)
-  ctx.logger.info('黑名单规则数: %d', config.blacklist?.length ?? 0)
-  ctx.logger.info('白名单规则数: %d', config.whitelist?.length ?? 0)
+  ctx.logger.info('启用黑白名单过滤插件')
+  ctx.logger.info('消息过滤模式: %s，规则数: %d', config.filterMode,
+    config.filterMode === 'blacklist' ? (config.blacklist?.length ?? 0) : (config.whitelist?.length ?? 0))
   ctx.logger.info('中间件重新注册间隔: %d ms', config.reregisterInterval)
+
+  if (config.enableCommandFilter) {
+    ctx.logger.info('指令过滤已启用，模式: %s，规则数: %d', config.commandFilterMode,
+      config.commandFilterMode === 'blacklist' ? (config.commandBlacklist?.length ?? 0) : (config.commandWhitelist?.length ?? 0))
+  }
 
   // 标记插件是否已启用
   let isActive = true
@@ -180,6 +285,40 @@ export function apply(ctx: Context, config: Config) {
 
   // 启动轮询
   startReregisterLoop()
+
+  // 注册指令级过滤
+  if (config.enableCommandFilter) {
+    ctx.before('command/execute', (argv) => {
+      const { session, command } = argv
+
+      if (!session || !command) {
+        return
+      }
+
+      const userId = session.userId || session.event?.user?.id
+      if (!userId) {
+        return
+      }
+
+      const commandName = command.name
+      const shouldBlock = shouldFilterCommand(userId, commandName, config)
+
+      if (shouldBlock) {
+        if (config.logBlocked) {
+          ctx.logger.info('屏蔽指令 - 用户:%s 指令:%s', userId, commandName)
+        }
+
+        if (config.replyNoPermission) {
+          return '你没有权限使用此指令'
+        }
+
+        // 不回复消息，静默拦截
+        return ''
+      }
+    })
+
+    ctx.logger.info('指令级过滤钩子已注册')
+  }
 
   // 加载插件组内的插件（如果有的话）
   const parentConfig = ctx.scope.parent.config
@@ -282,3 +421,4 @@ function shouldFilterSession(session: any, config: Config): boolean {
 
   return false
 }
+
