@@ -16,6 +16,7 @@ export interface Config {
   filterMode: 'blacklist' | 'whitelist'
   blacklist: string[]
   whitelist: string[]
+  logBlocked: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -30,6 +31,9 @@ export const Config: Schema<Config> = Schema.object({
     .role('table')
     .description('白名单用户 ID 列表（filterMode=whitelist 时生效，只有这些用户能通过）')
     .default([]),
+  logBlocked: Schema.boolean()
+    .description('是否记录被屏蔽用户的消息日志')
+    .default(false),
 })
 
 const kRecord = Symbol.for('koishi.loader.record')
@@ -42,7 +46,7 @@ export function apply(ctx: Context, config: Config) {
 
   // 在根上下文注册全局过滤中间件
   // 关键：使用 ctx.accept() 确保中间件在插件禁用时被移除
-  ctx.accept(['blacklist', 'whitelist', 'filterMode'], (newConfig) => {
+  ctx.accept(['blacklist', 'whitelist', 'filterMode', 'logBlocked'], (newConfig) => {
     // 配置更新时重新应用
     Object.assign(config, newConfig)
   })
@@ -57,8 +61,11 @@ export function apply(ctx: Context, config: Config) {
 
     // 黑白名单过滤逻辑
     if (shouldFilterUser(userId, config)) {
-      const messageContent = session.content || session.elements?.map(e => e.toString()).join('') || '[无内容]'
-      ctx.logger.info('屏蔽用户 %s 消息："%s"', userId, messageContent)
+      // 根据配置决定是否输出日志
+      if (config.logBlocked) {
+        const messageContent = session.content || session.elements?.map(e => e.toString()).join('') || '[无内容]'
+        ctx.logger.info('屏蔽用户 %s 消息："%s"', userId, messageContent)
+      }
       return // 不调用 next()，完全屏蔽
     }
 
