@@ -45,7 +45,7 @@ export function apply(ctx: Context, config: Config) {
   // 标记插件是否已启用
   let isActive = true
 
-  // 在根上下文注册全局中间件，修改被屏蔽用户的 session 对象
+  // 在根上下文注册全局中间件，清空被屏蔽用户的消息内容
   const disposeMiddleware = ctx.root.middleware((session, next) => {
     if (!isActive) {
       return next()
@@ -66,7 +66,7 @@ export function apply(ctx: Context, config: Config) {
       // 清空消息内容，让后续插件无法获取实际内容
       session.content = ''
       session.elements = []
-      if (session.event) {
+      if (session.event && session.event.message) {
         session.event.message = { content: '', elements: [] } as any
       }
 
