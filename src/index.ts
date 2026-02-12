@@ -39,19 +39,14 @@ const kRecord = Symbol.for('koishi.loader.record')
 
 export function apply(ctx: Context, config: Config) {
   ctx.logger.info('启用黑白名单过滤插件，过滤模式: %s', config.filterMode)
+  ctx.logger.info('黑名单列表: %o', config.blacklist)
+  ctx.logger.info('白名单列表: %o', config.whitelist)
 
   // 标记插件是否已启用
   let isActive = true
 
-  // 在根上下文注册全局过滤中间件
-  // 使用 ctx.accept() 确保中间件在插件禁用时被移除
-  ctx.accept(['blacklist', 'whitelist', 'filterMode', 'logBlocked'], (newConfig) => {
-    // 配置更新时重新应用
-    Object.assign(config, newConfig)
-  })
-
-  const dispose = ctx.root.middleware((session, next) => {
-    // 检查插件是否仍然活跃
+  // 在根上下文注册全局中间件，修改被屏蔽用户的 session 对象
+  const disposeMiddleware = ctx.root.middleware((session, next) => {
     if (!isActive) {
       return next()
     }
@@ -64,18 +59,27 @@ export function apply(ctx: Context, config: Config) {
       if (config.logBlocked) {
         const messageContent = session.content || session.elements?.map(e => e.toString()).join('') || '[无内容]'
         ctx.logger.info('屏蔽用户 %s 消息："%s"', userId, messageContent)
+      } else {
+        ctx.logger.debug('屏蔽用户 %s（日志已关闭）', userId)
       }
-      return // 不调用 next()，完全屏蔽
+
+      // 清空消息内容，让后续插件无法获取实际内容
+      session.content = ''
+      session.elements = []
+      if (session.event) {
+        session.event.message = { content: '', elements: [] } as any
+      }
+
+      return // 不调用 next()，阻止中间件链继续
     }
 
-    // 通过过滤的消息继续传递
     return next()
   }, true) // prepend 确保最先执行
 
   // 当插件被禁用时，注销中间件
   ctx.on('dispose', () => {
     isActive = false
-    dispose()
+    disposeMiddleware()
     ctx.logger.info('黑白名单过滤插件已禁用，中间件已注销')
   })
 
